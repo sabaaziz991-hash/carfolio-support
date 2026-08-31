@@ -49,6 +49,30 @@ jobs:
           assert m["outputBytes"] <= 900000000;
           print(m["recordCount"], m["shardCount"], m["outputBytes"])'
 
+      - name: Verify every shard decodes and matches the manifest
+        run: |
+          python3 - <<'EOF'
+          import json, pathlib, zlib
+          root = pathlib.Path("data/israel-vehicles/v2")
+          manifest = json.loads((root / "manifest.json").read_text())
+          shards = sorted(root.glob("shards/*.json.zlib"))
+          assert len(shards) == manifest["shardCount"], (len(shards), manifest["shardCount"])
+          total = 0
+          for path in shards:
+              shard = json.loads(zlib.decompress(path.read_bytes()))
+              assert shard["schemaVersion"] == manifest["schemaVersion"], path.name
+              assert shard["generatedAt"] == manifest["generatedAt"], path.name
+              passenger = shard["passengerRecords"]
+              heavy = shard["heavyRecords"]
+              assert isinstance(passenger, list) and isinstance(heavy, list), path.name
+              prefix = path.name.split(".")[0]
+              for record in passenger + heavy:
+                  assert str(record[0])[:2] == prefix, (path.name, record[0])
+              total += len(passenger) + len(heavy)
+          assert total == manifest["recordCount"], (total, manifest["recordCount"])
+          print(f"verified {len(shards)} shards, {total:,} records")
+          EOF
+
       - name: Create draft data release
         id: release
         env:
@@ -104,4 +128,20 @@ jobs:
               } catch (error) {
                 core.warning(`Could not remove tag ${release.tag_name}: ${error.message}`);
               }
+            }
+            // A run that fails between draft creation and publication leaves
+            // its draft behind; this run's own draft is already published.
+            const staleBefore = Date.now() - 48 * 60 * 60 * 1000;
+            const staleDrafts = releases.filter(release =>
+              release.draft
+                && release.tag_name.startsWith("israel-vehicles-")
+                && new Date(release.created_at) < staleBefore
+            );
+            for (const release of staleDrafts) {
+              await github.rest.repos.deleteRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.id
+              });
+              core.info(`Removed stale draft ${release.tag_name}`);
             }
