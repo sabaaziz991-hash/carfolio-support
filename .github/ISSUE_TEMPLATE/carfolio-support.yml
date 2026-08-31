@@ -1,0 +1,53 @@
+name: Carfolio support request
+description: Ask for help with Carfolio or Carfolio Premium
+title: "Support: "
+labels:
+  - support
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include a full VIN, registration plate, address, payment information, or damage photo in this public issue. Apple handles billing; Carfolio support cannot see or change your Apple payment details.
+  - type: dropdown
+    id: market
+    attributes:
+      label: Market
+      options:
+        - United States
+        - Israel
+        - Netherlands
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: topic
+    attributes:
+      label: Topic
+      options:
+        - Subscription or restore purchases
+        - Vehicle lookup
+        - Damage appraisal
+        - Saved vehicle or appraisal
+        - Recall information
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: app-version
+    attributes:
+      label: Carfolio version
+      placeholder: Example: 1.0 (1)
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the steps and what you expected. Remove vehicle identifiers and personal information.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed full VINs, plates, payment details, addresses, and photos.
+          required: true
