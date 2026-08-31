@@ -20,6 +20,9 @@ import io
 import json
 import shutil
 import tempfile
+import time
+import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 from collections import OrderedDict
@@ -158,8 +161,8 @@ class ShardWriters:
         self.handles.clear()
 
 
-def integer(value: str | None) -> int | None:
-    cleaned = (value or "").strip()
+def integer(value: object | None) -> int | None:
+    cleaned = str(value or "").strip()
     if not cleaned:
         return None
     try:
@@ -168,8 +171,8 @@ def integer(value: str | None) -> int | None:
         return None
 
 
-def number(value: str | None) -> int | float | None:
-    cleaned = (value or "").strip()
+def number(value: object | None) -> int | float | None:
+    cleaned = str(value or "").strip()
     if not cleaned:
         return None
     try:
@@ -186,7 +189,7 @@ def valid_plate(value: int | None) -> bool:
     return value is not None and 3 <= len(str(value)) <= 8
 
 
-def compact_passenger_record(row: dict[str, str]) -> list[object | None] | None:
+def compact_passenger_record(row: dict[str, object]) -> list[object | None] | None:
     plate = integer(row.get("mispar_rechev"))
     if not valid_plate(plate):
         return None
@@ -196,7 +199,7 @@ def compact_passenger_record(row: dict[str, str]) -> list[object | None] | None:
         if value is not None:
             result[field] = value
     for field in PASSENGER_TEXT_FIELDS:
-        value = (row.get(field) or "").strip()
+        value = str(row.get(field) or "").strip()
         if value:
             result[field] = value
     # Ordered arrays avoid repeating long official column names millions of
@@ -205,7 +208,7 @@ def compact_passenger_record(row: dict[str, str]) -> list[object | None] | None:
     return [result.get(field) for field in PASSENGER_RETAINED_FIELDS]
 
 
-def compact_heavy_record(row: dict[str, str]) -> list[object | None] | None:
+def compact_heavy_record(row: dict[str, object]) -> list[object | None] | None:
     plate = integer(row.get("mispar_rechev"))
     if not valid_plate(plate):
         return None
@@ -219,7 +222,7 @@ def compact_heavy_record(row: dict[str, str]) -> list[object | None] | None:
         if value is not None:
             result[field] = value
     for field in HEAVY_TEXT_FIELDS:
-        value = (row.get(field) or "").strip()
+        value = str(row.get(field) or "").strip()
         if value:
             result[field] = value
     return [result.get(field) for field in HEAVY_RETAINED_FIELDS]
@@ -233,6 +236,118 @@ def open_source(url: str, local_file: Path | None):
         headers={"User-Agent": "Carfolio official-data snapshot builder/2.0"},
     )
     return urllib.request.urlopen(request, timeout=180)
+
+
+def datastore_page(
+    *,
+    resource_id: str,
+    limit: int,
+    offset: int,
+) -> dict[str, object]:
+    query = urllib.parse.urlencode(
+        {
+            "resource_id": resource_id,
+            "limit": limit,
+            "offset": offset,
+            "sort": "_id asc",
+        }
+    )
+    url = f"https://data.gov.il/api/3/action/datastore_search?{query}"
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Carfolio official-data snapshot builder/2.0"},
+    )
+    last_error: Exception | None = None
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                envelope = json.load(response)
+            if not envelope.get("success"):
+                raise RuntimeError("Official DataStore returned success=false")
+            result = envelope.get("result")
+            if not isinstance(result, dict):
+                raise RuntimeError("Official DataStore response has no result object")
+            return result
+        except (
+            urllib.error.HTTPError,
+            urllib.error.URLError,
+            TimeoutError,
+            json.JSONDecodeError,
+            RuntimeError,
+        ) as error:
+            last_error = error
+            if isinstance(error, urllib.error.HTTPError) and error.code < 500:
+                if error.code != 429:
+                    break
+            if attempt < 3:
+                time.sleep(2**attempt)
+    raise RuntimeError(
+        f"Official DataStore page failed at offset {offset:,}: {last_error}"
+    ) from last_error
+
+
+def ingest_datastore(
+    *,
+    resource_id: str,
+    output_directory: Path,
+    required_fields: tuple[str, ...],
+    compactor: Callable[[dict[str, object]], list[object | None] | None],
+    page_size: int,
+) -> int:
+    writers = ShardWriters(output_directory)
+    record_count = 0
+    offset = 0
+    total: int | None = None
+    schema_checked = False
+    try:
+        while total is None or offset < total:
+            result = datastore_page(
+                resource_id=resource_id,
+                limit=page_size,
+                offset=offset,
+            )
+            records = result.get("records")
+            if not isinstance(records, list):
+                raise RuntimeError("Official DataStore response has no records array")
+            if total is None:
+                total = integer(result.get("total"))
+                if total is None:
+                    raise RuntimeError("Official DataStore response has no total count")
+            if not records:
+                if offset < total:
+                    raise RuntimeError(
+                        f"Official DataStore stopped at {offset:,} of {total:,} records"
+                    )
+                break
+
+            if not schema_checked:
+                missing = set(required_fields) - set(records[0])
+                if missing:
+                    raise RuntimeError(
+                        "Official DataStore is missing required columns: "
+                        + ", ".join(sorted(missing))
+                    )
+                schema_checked = True
+
+            for row in records:
+                if not isinstance(row, dict):
+                    continue
+                record = compactor(row)
+                if record is None:
+                    continue
+                plate = str(record[0])
+                writers.write(plate[:PLATE_PREFIX_LENGTH], record)
+                record_count += 1
+
+            offset += len(records)
+            if offset % 250_000 < len(records):
+                print(
+                    f"{resource_id}: processed {offset:,} of {total:,}",
+                    flush=True,
+                )
+    finally:
+        writers.close()
+    return record_count
 
 
 def source_encoding(sample: bytes) -> str:
@@ -310,6 +425,8 @@ def build(
     minimum_passenger_records: int = 0,
     minimum_heavy_records: int = 0,
     maximum_output_bytes: int = 0,
+    remote_delivery: str = "datastore",
+    datastore_page_size: int = 25_000,
 ) -> None:
     generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     output_root.parent.mkdir(parents=True, exist_ok=True)
@@ -327,13 +444,22 @@ def build(
             passenger_directory.mkdir()
             heavy_directory.mkdir()
 
-            passenger_count = ingest(
-                source_url=passenger_source_url,
-                local_file=passenger_local_file,
-                output_directory=passenger_directory,
-                required_fields=PASSENGER_REQUIRED_FIELDS,
-                compactor=compact_passenger_record,
-            )
+            if passenger_local_file is None and remote_delivery == "datastore":
+                passenger_count = ingest_datastore(
+                    resource_id=PASSENGER_RESOURCE_ID,
+                    output_directory=passenger_directory,
+                    required_fields=PASSENGER_REQUIRED_FIELDS,
+                    compactor=compact_passenger_record,
+                    page_size=datastore_page_size,
+                )
+            else:
+                passenger_count = ingest(
+                    source_url=passenger_source_url,
+                    local_file=passenger_local_file,
+                    output_directory=passenger_directory,
+                    required_fields=PASSENGER_REQUIRED_FIELDS,
+                    compactor=compact_passenger_record,
+                )
             if passenger_count < minimum_passenger_records:
                 raise RuntimeError(
                     f"Passenger snapshot has {passenger_count:,} records; "
@@ -342,13 +468,22 @@ def build(
 
             heavy_count = 0
             if heavy_source_url is not None or heavy_local_file is not None:
-                heavy_count = ingest(
-                    source_url=heavy_source_url or "",
-                    local_file=heavy_local_file,
-                    output_directory=heavy_directory,
-                    required_fields=HEAVY_REQUIRED_FIELDS,
-                    compactor=compact_heavy_record,
-                )
+                if heavy_local_file is None and remote_delivery == "datastore":
+                    heavy_count = ingest_datastore(
+                        resource_id=HEAVY_RESOURCE_ID,
+                        output_directory=heavy_directory,
+                        required_fields=HEAVY_REQUIRED_FIELDS,
+                        compactor=compact_heavy_record,
+                        page_size=datastore_page_size,
+                    )
+                else:
+                    heavy_count = ingest(
+                        source_url=heavy_source_url or "",
+                        local_file=heavy_local_file,
+                        output_directory=heavy_directory,
+                        required_fields=HEAVY_REQUIRED_FIELDS,
+                        compactor=compact_heavy_record,
+                    )
             if heavy_count < minimum_heavy_records:
                 raise RuntimeError(
                     f"Heavy snapshot has {heavy_count:,} records; "
@@ -393,6 +528,11 @@ def build(
             "platePrefixLength": PLATE_PREFIX_LENGTH,
             "attribution": ATTRIBUTION,
             "licenseURL": LICENSE_URL,
+            "sourceDelivery": (
+                "data.gov.il CKAN DataStore pagination"
+                if remote_delivery == "datastore"
+                else "official bulk CSV"
+            ),
             "sources": [
                 {
                     "registry": "passenger",
@@ -479,6 +619,12 @@ def main() -> None:
     parser.add_argument("--minimum-passenger-records", type=int, default=0)
     parser.add_argument("--minimum-heavy-records", type=int, default=0)
     parser.add_argument("--maximum-output-bytes", type=int, default=0)
+    parser.add_argument(
+        "--remote-delivery",
+        choices=("datastore", "csv"),
+        default="datastore",
+    )
+    parser.add_argument("--datastore-page-size", type=int, default=25_000)
     args = parser.parse_args()
     build(
         args.passenger_source_url,
@@ -489,6 +635,8 @@ def main() -> None:
         minimum_passenger_records=args.minimum_passenger_records,
         minimum_heavy_records=args.minimum_heavy_records,
         maximum_output_bytes=args.maximum_output_bytes,
+        remote_delivery=args.remote_delivery,
+        datastore_page_size=args.datastore_page_size,
     )
 
 

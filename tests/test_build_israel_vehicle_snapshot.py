@@ -4,15 +4,72 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import build_israel_vehicle_snapshot as snapshot_builder  # noqa: E402
 from build_israel_vehicle_snapshot import build  # noqa: E402
 
 
 class IsraelVehicleSnapshotBuilderTests(unittest.TestCase):
+    def test_datastore_ingestion_pages_without_loading_the_registry_at_once(self):
+        pages = [
+            {
+                "total": 3,
+                "records": [
+                    {
+                        "mispar_rechev": 82925003,
+                        "shnat_yitzur": 2024,
+                        "tozeret_nm": "בי ווי די סין",
+                        "degem_nm": "SC2EXQ",
+                        "kinuy_mishari": "ATTO 3",
+                    },
+                    {
+                        "mispar_rechev": 82960303,
+                        "shnat_yitzur": 2024,
+                        "tozeret_nm": "בי ווי די סין",
+                        "degem_nm": "SC2EXQ",
+                        "kinuy_mishari": "ATTO 3",
+                    },
+                ],
+            },
+            {
+                "total": 3,
+                "records": [
+                    {
+                        "mispar_rechev": 83859202,
+                        "shnat_yitzur": 2022,
+                        "tozeret_nm": "אאודי",
+                        "degem_nm": "A3",
+                        "kinuy_mishari": "A3",
+                    }
+                ],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            with patch.object(
+                snapshot_builder,
+                "datastore_page",
+                side_effect=pages,
+            ) as request:
+                count = snapshot_builder.ingest_datastore(
+                    resource_id=snapshot_builder.PASSENGER_RESOURCE_ID,
+                    output_directory=output,
+                    required_fields=snapshot_builder.PASSENGER_REQUIRED_FIELDS,
+                    compactor=snapshot_builder.compact_passenger_record,
+                    page_size=2,
+                )
+
+            self.assertEqual(count, 3)
+            self.assertEqual(request.call_count, 2)
+            self.assertEqual(request.call_args_list[1].kwargs["offset"], 2)
+            self.assertTrue((output / "82.ndjson").exists())
+            self.assertTrue((output / "83.ndjson").exists())
+
     def test_builds_plate_prefix_shards_and_manifest(self):
         fixture = ROOT / "tests" / "fixtures" / "israel-vehicles-sample.csv"
         heavy_fixture = ROOT / "tests" / "fixtures" / "israel-heavy-vehicles-sample.csv"
