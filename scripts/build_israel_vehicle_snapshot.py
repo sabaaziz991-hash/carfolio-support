@@ -366,7 +366,7 @@ def ingest(
     local_file: Path | None,
     output_directory: Path,
     required_fields: tuple[str, ...],
-    compactor: Callable[[dict[str, str]], list[object | None] | None],
+    compactor: Callable[[dict[str, object]], list[object | None] | None],
 ) -> int:
     writers = ShardWriters(output_directory)
     record_count = 0
