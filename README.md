@@ -1,6 +1,6 @@
-# Carfolio support site
+# Carvetted support site
 
-Static GitHub Pages source for Carfolio's public privacy policy, subscription
+Static GitHub Pages source for Carvetted's public privacy policy, subscription
 terms, and customer support pages in English, Hebrew, and Dutch.
 
 The intended public repository name is `carfolio-support`. GitHub Pages should
@@ -14,7 +14,7 @@ GitHub Issues URLs if the authenticated account differs from
 
 `scripts/build_israel_vehicle_snapshot.py` streams both official Ministry of
 Transport registries—the private/commercial registry up to 3,500 kg and the
-heavy/code-less registry—and publishes only the fields used by Carfolio as
+heavy/code-less registry—and publishes only the fields used by Carvetted as
 mixed, zlib-compressed plate-prefix JSON shards under
 `data/israel-vehicles/v2/`.
 

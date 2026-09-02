@@ -1,5 +1,5 @@
-name: Carfolio support request
-description: Ask for help with Carfolio or Carfolio Premium
+name: Carvetted support request
+description: Ask for help with Carvetted or Carvetted Premium
 title: "Support: "
 labels:
   - support
@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Do not include a full VIN, registration plate, address, payment information, or damage photo in this public issue. Apple handles billing; Carfolio support cannot see or change your Apple payment details.
+        Do not include a full VIN, registration plate, address, payment information, or damage photo in this public issue. Apple handles billing; Carvetted support cannot see or change your Apple payment details.
   - type: dropdown
     id: market
     attributes:
@@ -35,7 +35,7 @@ body:
   - type: input
     id: app-version
     attributes:
-      label: Carfolio version
+      label: Carvetted version
       placeholder: Example: 1.0 (1)
   - type: textarea
     id: description

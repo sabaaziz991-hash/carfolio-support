@@ -3,7 +3,7 @@
 
 The Ministry publishes separate daily CSV resources for passenger/commercial
 vehicles up to 3,500 kg and for heavy/code-less vehicles. This builder streams
-both resources, retains only fields consumed by Carfolio, and produces one
+both resources, retains only fields consumed by Carvetted, and produces one
 mixed shard per plate prefix. A lookup therefore needs one small static file
 and can resolve either registry without guessing the vehicle class first.
 
@@ -233,7 +233,7 @@ def open_source(url: str, local_file: Path | None):
         return local_file.open("rb")
     request = urllib.request.Request(
         url,
-        headers={"User-Agent": "Carfolio official-data snapshot builder/2.0"},
+        headers={"User-Agent": "Carvetted official-data snapshot builder/2.0"},
     )
     return urllib.request.urlopen(request, timeout=180)
 
@@ -255,7 +255,7 @@ def datastore_page(
     url = f"https://data.gov.il/api/3/action/datastore_search?{query}"
     request = urllib.request.Request(
         url,
-        headers={"User-Agent": "Carfolio official-data snapshot builder/2.0"},
+        headers={"User-Agent": "Carvetted official-data snapshot builder/2.0"},
     )
     last_error: Exception | None = None
     for attempt in range(4):

@@ -84,7 +84,7 @@ jobs:
             --draft \
             --target "${GITHUB_SHA}" \
             --title "Israel vehicle registry snapshot ${tag#israel-vehicles-}" \
-            --notes "Field-minimized official Israel Ministry of Transport passenger and heavy-vehicle registry snapshot for Carfolio fallback lookup."
+            --notes "Field-minimized official Israel Ministry of Transport passenger and heavy-vehicle registry snapshot for Carvetted fallback lookup."
 
       - name: Upload compact data assets
         env:
