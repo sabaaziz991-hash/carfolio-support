@@ -14,6 +14,22 @@ import build_israel_vehicle_snapshot as snapshot_builder  # noqa: E402
 from build_israel_vehicle_snapshot import build  # noqa: E402
 
 
+class _JSONResponse:
+    """Minimal stand-in for the urlopen context manager."""
+
+    def __init__(self, payload):
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def read(self, *args):
+        return self._body
+
+
 class IsraelVehicleSnapshotBuilderTests(unittest.TestCase):
     def test_datastore_ingestion_pages_without_loading_the_registry_at_once(self):
         pages = [
@@ -48,10 +64,13 @@ class IsraelVehicleSnapshotBuilderTests(unittest.TestCase):
                     }
                 ],
             },
+            {"records": []},
         ]
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
             with patch.object(
+                snapshot_builder, "datastore_exact_total", return_value=3
+            ), patch.object(
                 snapshot_builder,
                 "datastore_page",
                 side_effect=pages,
@@ -65,10 +84,97 @@ class IsraelVehicleSnapshotBuilderTests(unittest.TestCase):
                 )
 
             self.assertEqual(count, 3)
-            self.assertEqual(request.call_count, 2)
+            self.assertEqual(request.call_count, 3)
             self.assertEqual(request.call_args_list[1].kwargs["offset"], 2)
             self.assertTrue((output / "82.ndjson").exists())
             self.assertTrue((output / "83.ndjson").exists())
+
+    def _passenger_row(self, plate):
+        return {
+            "mispar_rechev": plate,
+            "shnat_yitzur": 2022,
+            "tozeret_nm": "אאודי",
+            "degem_nm": "A3",
+            "kinuy_mishari": "A3",
+        }
+
+    def _ingest(self, pages, total):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(
+                snapshot_builder, "datastore_exact_total", return_value=total
+            ), patch.object(snapshot_builder, "datastore_page", side_effect=pages):
+                return snapshot_builder.ingest_datastore(
+                    resource_id=snapshot_builder.PASSENGER_RESOURCE_ID,
+                    output_directory=Path(temporary),
+                    required_fields=snapshot_builder.PASSENGER_REQUIRED_FIELDS,
+                    compactor=snapshot_builder.compact_passenger_record,
+                    page_size=2,
+                )
+
+    def test_ingestion_reads_past_an_understated_count(self):
+        # A count lower than the real row count must never truncate the tail.
+        pages = [
+            {"records": [self._passenger_row(82925003), self._passenger_row(82960303)]},
+            {"records": [self._passenger_row(83859202)]},
+            {"records": []},
+        ]
+        self.assertEqual(self._ingest(pages, total=2), 3)
+
+    def test_ingestion_rejects_paging_that_stops_before_the_exact_count(self):
+        pages = [
+            {"records": [self._passenger_row(82925003), self._passenger_row(82960303)]},
+            {"records": []},
+        ]
+        with self.assertRaisesRegex(RuntimeError, "stopped at 2 of 5"):
+            self._ingest(pages, total=5)
+
+    def test_exact_total_retries_missing_and_estimated_counts(self):
+        envelopes = [
+            {"success": True, "result": {"records": []}},
+            {"success": True, "result": {"total": 4181719, "total_was_estimated": True}},
+            {"success": True, "result": {"total": 4181719, "total_was_estimated": False}},
+        ]
+        requested_urls = []
+
+        def respond(request, timeout):
+            requested_urls.append(request.full_url)
+            return _JSONResponse(envelopes[len(requested_urls) - 1])
+
+        with patch.object(snapshot_builder.urllib.request, "urlopen", side_effect=respond), \
+                patch.object(snapshot_builder.time, "sleep"):
+            total = snapshot_builder.datastore_exact_total(
+                resource_id=snapshot_builder.PASSENGER_RESOURCE_ID
+            )
+
+        self.assertEqual(total, 4181719)
+        self.assertEqual(len(requested_urls), 3)
+        self.assertIn("total_estimation_threshold=1000000000", requested_urls[0])
+
+    def test_exact_total_gives_up_after_bounded_retries(self):
+        def respond(request, timeout):
+            return _JSONResponse({"success": True, "result": {"records": []}})
+
+        with patch.object(snapshot_builder.urllib.request, "urlopen", side_effect=respond) as urlopen, \
+                patch.object(snapshot_builder.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "no total count"):
+                snapshot_builder.datastore_exact_total(
+                    resource_id=snapshot_builder.PASSENGER_RESOURCE_ID
+                )
+        self.assertEqual(urlopen.call_count, snapshot_builder.DATASTORE_ATTEMPTS)
+
+    def test_pages_skip_the_per_page_count(self):
+        requested_urls = []
+
+        def respond(request, timeout):
+            requested_urls.append(request.full_url)
+            return _JSONResponse({"success": True, "result": {"records": []}})
+
+        with patch.object(snapshot_builder.urllib.request, "urlopen", side_effect=respond):
+            snapshot_builder.datastore_page(
+                resource_id=snapshot_builder.PASSENGER_RESOURCE_ID, limit=2, offset=4
+            )
+        self.assertIn("include_total=false", requested_urls[0])
+        self.assertIn("offset=4", requested_urls[0])
 
     def test_builds_plate_prefix_shards_and_manifest(self):
         fixture = ROOT / "tests" / "fixtures" / "israel-vehicles-sample.csv"

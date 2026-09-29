@@ -238,27 +238,30 @@ def open_source(url: str, local_file: Path | None):
     return urllib.request.urlopen(request, timeout=180)
 
 
-def datastore_page(
+# Above any realistic registry size, so CKAN returns an exact count instead of
+# its default planner estimate (`total_was_estimated: true`).
+EXACT_TOTAL_THRESHOLD = 1_000_000_000
+DATASTORE_ATTEMPTS = 6
+
+
+def datastore_request(
+    parameters: dict[str, object],
     *,
-    resource_id: str,
-    limit: int,
-    offset: int,
+    description: str,
+    validate: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object]:
-    query = urllib.parse.urlencode(
-        {
-            "resource_id": resource_id,
-            "limit": limit,
-            "offset": offset,
-            "sort": "_id asc",
-        }
-    )
+    """Fetch one DataStore result, retrying transport errors and incomplete
+    envelopes alike. data.gov.il occasionally answers successfully without the
+    fields a caller needs (for example no `total` while a resource reloads), so
+    validation runs inside the retry loop rather than failing the whole build."""
+    query = urllib.parse.urlencode(parameters)
     url = f"https://data.gov.il/api/3/action/datastore_search?{query}"
     request = urllib.request.Request(
         url,
         headers={"User-Agent": "Carvetted official-data snapshot builder/2.0"},
     )
     last_error: Exception | None = None
-    for attempt in range(4):
+    for attempt in range(DATASTORE_ATTEMPTS):
         try:
             with urllib.request.urlopen(request, timeout=180) as response:
                 envelope = json.load(response)
@@ -267,6 +270,8 @@ def datastore_page(
             result = envelope.get("result")
             if not isinstance(result, dict):
                 raise RuntimeError("Official DataStore response has no result object")
+            if validate is not None:
+                validate(result)
             return result
         except (
             urllib.error.HTTPError,
@@ -279,11 +284,59 @@ def datastore_page(
             if isinstance(error, urllib.error.HTTPError) and error.code < 500:
                 if error.code != 429:
                     break
-            if attempt < 3:
-                time.sleep(2**attempt)
+            if attempt < DATASTORE_ATTEMPTS - 1:
+                time.sleep(min(60, 2 ** (attempt + 1)))
     raise RuntimeError(
-        f"Official DataStore page failed at offset {offset:,}: {last_error}"
+        f"Official DataStore {description} failed: {last_error}"
     ) from last_error
+
+
+def datastore_exact_total(*, resource_id: str) -> int:
+    def validate(result: dict[str, object]) -> None:
+        total = integer(result.get("total"))
+        if total is None or total <= 0:
+            raise RuntimeError("Official DataStore response has no total count")
+        if result.get("total_was_estimated"):
+            raise RuntimeError("Official DataStore returned an estimated total")
+
+    result = datastore_request(
+        {
+            "resource_id": resource_id,
+            "limit": 0,
+            "include_total": "true",
+            "total_estimation_threshold": EXACT_TOTAL_THRESHOLD,
+        },
+        description="exact record count",
+        validate=validate,
+    )
+    total = integer(result.get("total"))
+    assert total is not None
+    return total
+
+
+def datastore_page(
+    *,
+    resource_id: str,
+    limit: int,
+    offset: int,
+) -> dict[str, object]:
+    def validate(result: dict[str, object]) -> None:
+        if not isinstance(result.get("records"), list):
+            raise RuntimeError("Official DataStore response has no records array")
+
+    return datastore_request(
+        {
+            "resource_id": resource_id,
+            "limit": limit,
+            "offset": offset,
+            "sort": "_id asc",
+            # The exact count is fetched once up front; counting on every page
+            # would only return a planner estimate and cost a scan.
+            "include_total": "false",
+        },
+        description=f"page at offset {offset:,}",
+        validate=validate,
+    )
 
 
 def ingest_datastore(
@@ -297,10 +350,13 @@ def ingest_datastore(
     writers = ShardWriters(output_directory)
     record_count = 0
     offset = 0
-    total: int | None = None
     schema_checked = False
+    total = datastore_exact_total(resource_id=resource_id)
     try:
-        while total is None or offset < total:
+        # Page until the DataStore returns an empty page. The count only
+        # verifies completeness; it never ends the loop early, so rows added
+        # after it was taken are still included.
+        while True:
             result = datastore_page(
                 resource_id=resource_id,
                 limit=page_size,
@@ -309,10 +365,6 @@ def ingest_datastore(
             records = result.get("records")
             if not isinstance(records, list):
                 raise RuntimeError("Official DataStore response has no records array")
-            if total is None:
-                total = integer(result.get("total"))
-                if total is None:
-                    raise RuntimeError("Official DataStore response has no total count")
             if not records:
                 if offset < total:
                     raise RuntimeError(
@@ -347,6 +399,7 @@ def ingest_datastore(
                 )
     finally:
         writers.close()
+    print(f"{resource_id}: read {offset:,} rows (exact count {total:,})", flush=True)
     return record_count
 
 

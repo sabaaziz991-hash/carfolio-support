@@ -3,8 +3,9 @@ name: Publish Israel vehicle snapshot
 on:
   workflow_dispatch:
   schedule:
-    # Ministry resources currently refresh around 03:30 UTC. Build after that
-    # window so the release is not needlessly one day behind.
+    # Ministry resources currently refresh around 03:30 UTC. Requesting 05:30
+    # keeps the build after that window; GitHub queues scheduled runs, so they
+    # have actually started between about 09:30 and 12:00 UTC.
     - cron: "30 5 * * *"
 
 permissions:
@@ -20,9 +21,9 @@ jobs:
     # a larger runner or make the repository private without reviewing billing.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
@@ -110,9 +111,12 @@ jobs:
               github.rest.repos.listReleases,
               { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 }
             );
+            // GitHub sets created_at to the target commit's date, so every
+            // snapshot built from the same commit ties. Release IDs increase
+            // monotonically, which orders snapshots by when they were made.
             const snapshots = releases
               .filter(release => !release.draft && release.tag_name.startsWith("israel-vehicles-"))
-              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+              .sort((a, b) => b.id - a.id);
             for (const release of snapshots.slice(2)) {
               await github.rest.repos.deleteRelease({
                 owner: context.repo.owner,
@@ -131,11 +135,19 @@ jobs:
             }
             // A run that fails between draft creation and publication leaves
             // its draft behind; this run's own draft is already published.
+            // Age comes from the build timestamp in the tag
+            // (israel-vehicles-YYYYMMDD-HHMMSS-<run>), not created_at.
             const staleBefore = Date.now() - 48 * 60 * 60 * 1000;
+            const builtAt = tag => {
+              const match = /^israel-vehicles-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-/.exec(tag);
+              return match
+                ? Date.UTC(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +match[6])
+                : Number.NaN;
+            };
             const staleDrafts = releases.filter(release =>
               release.draft
                 && release.tag_name.startsWith("israel-vehicles-")
-                && new Date(release.created_at) < staleBefore
+                && builtAt(release.tag_name) < staleBefore
             );
             for (const release of staleDrafts) {
               await github.rest.repos.deleteRelease({
